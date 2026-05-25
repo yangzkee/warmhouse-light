@@ -1,0 +1,21 @@
+.DS_Store
+._*
+
+# Keil/uVision user and build outputs
+*.uvguix.*
+*.bak
+*.dep
+*.crf
+*.o
+*.d
+*.axf
+*.htm
+*.build_log.htm
+*.lnp
+*.map
+*.sct
+*.lst
+build_log.txt
+
+MDK-ARM/light_test/*
+!MDK-ARM/light_test/.gitkeep
