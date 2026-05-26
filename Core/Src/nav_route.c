@@ -40,8 +40,8 @@ static const NavRouteNodeDef_t s_route_table[] = {
 	{ 15.30f, NAV_ROUTE_IGNORE,     0 }, /* idx6：8字顶弧；武装 Fig8；正图左出迷宫依赖尾段光电+LineTracking */
 	{ 16.20f, NAV_ROUTE_IGNORE,     0 }, /* 提示：近终点前路段 */
 	{ 16.65f, NAV_ROUTE_RADAR_ARM,  0 }, /* 武装雷达：等 T 字全黑后扫描选边（须为 RADAR_ARM，仅用 IGNORE 不会进 LT_RADAR_WAIT_T） */
-	{ 18.42f, NAV_ROUTE_IGNORE,       0u }, /* idx9：仅过点；交口循线 PID+光电，不注入 ROUTE_GUIDE */
-	{ 19.15f, NAV_ROUTE_IGNORE,       0 }, /* idx10：与 LineTracking 盲走圆弧触发距一致（不注入导向） */
+	{ 18.40f, NAV_ROUTE_IGNORE,       0u }, /* idx9：仅过点；交口循线 PID+光电，不注入 ROUTE_GUIDE */
+	{ 19.13f, NAV_ROUTE_IGNORE,       0 }, /* idx10：与 LineTracking 盲走圆弧触发距一致（不注入导向） */
  	{ 20.10f, NAV_ROUTE_STOP,         0 }, /* idx11：终点停车 */
 };
 

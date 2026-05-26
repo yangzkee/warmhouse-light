@@ -451,6 +451,22 @@ static void LineTrack_MazeYawChk_Arm(u8 fired_idx, NavRouteAction_t act)
 #ifndef LT_NAV_ROUTE_IDX_CIRCLE_OUTER_ARC
 #define LT_NAV_ROUTE_IDX_CIRCLE_OUTER_ARC  5u
 #endif
+/* idx4(出迷宫)～idx5(圆外弧入8字) 弯段：略降纵向 + 按地图轻推弯向（右图左拐/左图右拐） */
+#ifndef LT_IDX45_CURVE_GUIDE_ENABLE
+#define LT_IDX45_CURVE_GUIDE_ENABLE  1
+#endif
+#ifndef LT_IDX45_CURVE_VY_K
+#define LT_IDX45_CURVE_VY_K  0.84f /* 弯段纵向略降，减轻丢线后 PIVOT */
+#endif
+#ifndef LT_IDX45_CURVE_GUIDE_SOFT_K
+#define LT_IDX45_CURVE_GUIDE_SOFT_K  0.36f
+#endif
+#ifndef LT_IDX45_CURVE_GUIDE_BLEND
+#define LT_IDX45_CURVE_GUIDE_BLEND  0.24f
+#endif
+#ifndef LT_IDX45_CURVE_SUPPRESS_GEO_CORNER
+#define LT_IDX45_CURVE_SUPPRESS_GEO_CORNER  1 /* 1=该窗内禁用 L/R 直角钳位，避免判反打 180° */
+#endif
 #ifndef LT_NAV_ROUTE_IDX_FIG8_POST_1041
 #define LT_NAV_ROUTE_IDX_FIG8_POST_1041  6u
 #endif
@@ -1044,6 +1060,15 @@ static u8 s_oled_radar_pick_is_left;
 #ifndef LT_NAV_IDX9_EXIT_SENDROT_EDGE_STREAK
 #define LT_NAV_IDX9_EXIT_SENDROT_EDGE_STREAK  1u /* 1=尽快触发；需更稳可改 2 */
 #endif
+#ifndef LT_NAV_IDX9_WINDOW_USE_LEAD
+#define LT_NAV_IDX9_WINDOW_USE_LEAD  1 /* 1：窗起点=t9-ROUTE_TRIGGER_LEAD，与 TryFire 对齐 */
+#endif
+#ifndef LT_NAV_IDX9_EXIT_FORCED_AFTER_M
+#define LT_NAV_IDX9_EXIT_FORCED_AFTER_M  0.40f /* 窗内光电未判到缘时，过 t9+此值里程兜底 sendrot */
+#endif
+#ifndef LT_NAV_IDX9_SUPPRESS_LOST_PIVOT
+#define LT_NAV_IDX9_SUPPRESS_LOST_PIVOT  1 /* 1：idx9 窗内未完成盲转时勿进 BLIND_SPRINT/PIVOT */
+#endif
 /* 旋转结束后先沿当前朝向盲走一段（里程弧长），再恢复 PID */
 #ifndef LT_NAV_IDX9_POST_ROT_BLIND_FWD_M
 #define LT_NAV_IDX9_POST_ROT_BLIND_FWD_M  0.04f
@@ -1453,6 +1478,56 @@ static u8 LtPost950_InOdomWindow(void)
 }
 #endif /* LT_POST_950_CORNER_GUIDE_ENABLE */
 
+/* idx4 触发后～idx5 触发前：出迷宫后入 8 字前的分地图弯段 */
+static u8 LtIdx45_InCurveWindow(void)
+{
+	float total;
+	float t4;
+	float t5;
+	float lead;
+
+	if (!Odom_IsValid())
+		return 0u;
+	if (LineTrack_InMazeZone() || LineTrack_MazeOptical_HoldsOdomExitNode())
+		return 0u;
+	if (s_maze_opt_phase == MAZE_OPT_BLIND_RUN)
+		return 0u;
+	lead = NavRoute_PhysicalMToOdomTotalM(ROUTE_TRIGGER_LEAD_M);
+	total = NavOdom_GetTotalDistanceM();
+	t4 = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_MAZE_EXIT_RIGHT);
+	t5 = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_CIRCLE_OUTER_ARC);
+	if (total < t4 - lead)
+		return 0u;
+	if (total >= t5 - lead)
+		return 0u;
+	return 1u;
+}
+
+#if LT_IDX45_CURVE_GUIDE_ENABLE != 0
+static void LineTrack_ApplyIdx45CurveAssist(float *err_io)
+{
+	float ge;
+	float t;
+
+	if (err_io == NULL || !LtIdx45_InCurveWindow())
+		return;
+	if (s_route_guide_ticks > 0u)
+		return;
+	ge = ROUTE_GUIDE_ERR * LT_IDX45_CURVE_GUIDE_SOFT_K;
+	t = LT_IDX45_CURVE_GUIDE_BLEND;
+	/* 右图(mirror<0)左拐；左图(mirror>=0)右拐 */
+	if (s_map_mirror >= 0) {
+		ge *= LT_ROUTE_GUIDE_WIDE_R_K;
+		if (*err_io > -ge)
+			*err_io = *err_io + (-ge - *err_io) * t;
+	} else {
+		ge *= LT_ROUTE_GUIDE_LEFT650_K;
+		if (*err_io < ge)
+			*err_io = *err_io + (ge - *err_io) * t;
+	}
+}
+#endif /* LT_IDX45_CURVE_GUIDE_ENABLE */
+
 static u8 LtArcKeep_InSegment(float total_m)
 {
 	float t0;
@@ -1485,6 +1560,82 @@ static u8 LtArcKeep_OutsideWhite123(u8 pattern)
 }
 
 #if LT_RADAR_BRANCH_ENABLE
+static void LtFsm_ResetCorner(void);
+
+static void LtNavIdx9_GetWindow(float *t_start, float *t_end, float *t9_table)
+{
+	float lead;
+
+	if (t_end)
+		*t_end = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_POSMAP_STRONG_LEFT);
+	if (t9_table)
+		*t9_table = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_RADAR_POST_HINT);
+	if (t_start) {
+#if LT_NAV_IDX9_WINDOW_USE_LEAD
+		lead = NavRoute_PhysicalMToOdomTotalM(ROUTE_TRIGGER_LEAD_M);
+		*t_start = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_RADAR_POST_HINT) - lead;
+#else
+		*t_start = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_RADAR_POST_HINT);
+#endif
+	}
+}
+
+static u8 LtNavIdx9_InWindow(float total_m)
+{
+	float ts, te;
+
+	if (!Odom_IsValid())
+		return 0u;
+	LtNavIdx9_GetWindow(&ts, &te, NULL);
+	return (total_m >= ts && total_m < te) ? 1u : 0u;
+}
+
+/* idx10 盲弧：idx9 窗内须先完成/进行出口盲转，避免 19.15m 抢跑清掉 idx9 状态 */
+static u8 LtNavIdx9_BlindArcAllowed(void)
+{
+	if (!Odom_IsValid())
+		return 1u;
+	if (!LtNavIdx9_InWindow(NavOdom_GetTotalDistanceM()))
+		return 1u;
+	if (s_nav_idx9_exit_rot_done != 0u)
+		return 1u;
+	if (s_nav_idx9_exit_rot_wait != 0u)
+		return 1u;
+	if (s_nav_idx9_post_rot_blind_fwd_active != 0u)
+		return 1u;
+	return 0u;
+}
+
+static float LtNavIdx9_PickRzDeg(u8 use_left)
+{
+	return use_left ? (-LT_NAV_IDX9_EXIT_SENDROT_DEG) : (LT_NAV_IDX9_EXIT_SENDROT_DEG);
+}
+
+static u8 LtNavIdx9_TrySendrot(float rz)
+{
+	if (!sendrot_AsyncBegin(0.0f, 0.0f, rz, LT_NAV_IDX9_EXIT_SENDROT_OMEGA))
+		return 0u;
+	s_nav_idx9_exit_rot_motion_start = HAL_GetTick();
+	s_nav_idx9_exit_rot_wait = 1u;
+	s_nav_idx9_exit_rot_edge_streak = 0u;
+	return 1u;
+}
+
+static u8 LtNavIdx9_ForcedRz(float *rz_out)
+{
+	if (rz_out == NULL)
+		return 0u;
+	if (s_lt_radar_pick_valid) {
+		*rz_out = LtNavIdx9_PickRzDeg(s_lt_radar_go_left != 0u);
+		return 1u;
+	}
+	/* 无雷达选边：与 idx10 盲弧地图约定一致（左图 rz 负 / 右图 rz 正） */
+	*rz_out = (s_map_mirror >= 0)
+	    ? (-LT_NAV_IDX9_EXIT_SENDROT_DEG)
+	    : (LT_NAV_IDX9_EXIT_SENDROT_DEG);
+	return 1u;
+}
+
 /**
  * [idx9,idx10)：口字出口盲转。
  * - sendrot_AsyncBegin(0,0,rz, LT_NAV_IDX9_EXIT_SENDROT_OMEGA)，与雷达 LT_RADAR_BRANCH_ROT 相同；
@@ -1496,15 +1647,16 @@ static u8 LtArcKeep_OutsideWhite123(u8 pattern)
 static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 {
 	float total;
-	float t9, t10;
+	float t_start, t_end, t9;
+	float forced_after;
 
 	(void)black_cnt;
 	if (!Odom_IsValid())
 		return 0u;
 	total = NavOdom_GetTotalDistanceM();
-	t9 = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_RADAR_POST_HINT);
-	t10 = NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_POSMAP_STRONG_LEFT);
-	if (total < t9) {
+	LtNavIdx9_GetWindow(&t_start, &t_end, &t9);
+	forced_after = NavRoute_PhysicalMToOdomTotalM(LT_NAV_IDX9_EXIT_FORCED_AFTER_M);
+	if (total < t_start) {
 		s_nav_idx9_exit_rot_done = 0u;
 		s_nav_idx9_exit_rot_edge_streak = 0u;
 		s_nav_idx9_sendrot_win_int_cleared = 0u;
@@ -1514,7 +1666,7 @@ static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 		return 0u;
 	}
 	/* 出 idx9～idx10 窗：仅当未在等 sendrot 时清状态（否则与 idx10 盲弧并发会打断旋转） */
-	if (total >= t10 && s_nav_idx9_exit_rot_wait == 0u) {
+	if (total >= t_end && s_nav_idx9_exit_rot_wait == 0u) {
 		s_nav_idx9_exit_rot_done = 0u;
 		s_nav_idx9_exit_rot_edge_streak = 0u;
 		s_nav_idx9_sendrot_win_int_cleared = 0u;
@@ -1529,6 +1681,7 @@ static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 	if (s_nav_idx9_sendrot_win_int_cleared == 0u) {
 		s_nav_idx9_sendrot_win_int_cleared = 1u;
 		s_err_integral = 0.0f;
+		LtFsm_ResetCorner();
 	}
 	if (s_nav_idx9_exit_rot_wait != 0u) {
 		if (DF_RotationAsyncTryConsumeDone(s_nav_idx9_exit_rot_motion_start)) {
@@ -1546,6 +1699,14 @@ static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 	if (s_nav_idx9_exit_rot_done != 0u)
 		return 0u;
 
+	/* 窗内里程兜底：光电一直未判到缘时也执行出口盲转 */
+	if (total >= (t9 + forced_after)) {
+		float rz_f;
+
+		if (LtNavIdx9_ForcedRz(&rz_f) != 0u && LtNavIdx9_TrySendrot(rz_f) != 0u)
+			return 1u;
+	}
+
 	if (had_new == 0u)
 		return 0u;
 	/* 仅丢线（全白）清 streak；全黑 0x00 允许触发，避免交口宽黑带永远不 sendrot */
@@ -1560,7 +1721,9 @@ static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 		float rz;
 
 		if (s_lt_radar_pick_valid) {
-			if (s_lt_radar_go_left != 0u) {
+			if (pattern == 0x00u) {
+				rz = LtNavIdx9_PickRzDeg(s_lt_radar_go_left != 0u);
+			} else if (s_lt_radar_go_left != 0u) {
 				if (edge_l == 0u) {
 					s_nav_idx9_exit_rot_edge_streak = 0u;
 					return 0u;
@@ -1574,23 +1737,24 @@ static u8 LineTrack_NavIdx9ExitRot_Tick(u8 pattern, u8 black_cnt, u8 had_new)
 				rz = LT_NAV_IDX9_EXIT_SENDROT_DEG;
 			}
 		} else {
-			if (edge_l == 0u && edge_r == 0u) {
+			if (pattern == 0x00u) {
+				if (LtNavIdx9_ForcedRz(&rz) == 0u)
+					return 0u;
+			} else if (edge_l == 0u && edge_r == 0u) {
 				s_nav_idx9_exit_rot_edge_streak = 0u;
 				return 0u;
+			} else {
+				if (edge_l != 0u && edge_r != 0u)
+					edge_r = 0u;
+				rz = (edge_l != 0u) ? (-LT_NAV_IDX9_EXIT_SENDROT_DEG) : (LT_NAV_IDX9_EXIT_SENDROT_DEG);
 			}
-			if (edge_l != 0u && edge_r != 0u)
-				edge_r = 0u;
-			rz = (edge_l != 0u) ? (-LT_NAV_IDX9_EXIT_SENDROT_DEG) : (LT_NAV_IDX9_EXIT_SENDROT_DEG);
 		}
 		if (s_nav_idx9_exit_rot_edge_streak < 255u)
 			s_nav_idx9_exit_rot_edge_streak++;
 		if (s_nav_idx9_exit_rot_edge_streak < LT_NAV_IDX9_EXIT_SENDROT_EDGE_STREAK)
 			return 0u;
-		if (!sendrot_AsyncBegin(0.0f, 0.0f, rz, LT_NAV_IDX9_EXIT_SENDROT_OMEGA))
+		if (LtNavIdx9_TrySendrot(rz) == 0u)
 			return 0u; /* 下发失败：保留 streak，下周期重试 */
-		s_nav_idx9_exit_rot_motion_start = HAL_GetTick();
-		s_nav_idx9_exit_rot_wait = 1u;
-		s_nav_idx9_exit_rot_edge_streak = 0u;
 		return 1u;
 	}
 }
@@ -2420,6 +2584,11 @@ static void LineTrack_ApplyGeoLaneShape(float *err_io, u8 pattern, u8 black_cnt)
 	if (pattern == 0x00u)
 		return;
 
+#if LT_IDX45_CURVE_SUPPRESS_GEO_CORNER != 0
+	if (LtIdx45_InCurveWindow())
+		goto geo_straight_mid_only;
+#endif
+
 	if (LtGeo_IsLeftRightAnglePat(pattern, black_cnt)) {
 		*err_io = fmaxf(*err_io, LT_GEO_CORNER_ERR_FLOOR);
 		return;
@@ -2441,6 +2610,7 @@ static void LineTrack_ApplyGeoLaneShape(float *err_io, u8 pattern, u8 black_cnt)
 			return;
 		}
 	}
+geo_straight_mid_only:
 	/* 直道段：345 或 456 三连黑，强化 L4/L5（与传入 pattern 一致） */
 	if (black_cnt < 7u) {
 		u8 l3 = LtPat_IsBlack(pattern, 3);
@@ -2719,6 +2889,14 @@ static void LtFsm_Update(u8 pattern, u8 black_cnt, float err_raw, u8 horiz, u8 v
 
 	/* 丢线：竖线消失；下一节点近则多等里程预设，否则直角时快盲冲→自转 */
 	if (pattern == LINE_LOST) {
+#if LT_RADAR_BRANCH_ENABLE && LT_NAV_IDX9_SUPPRESS_LOST_PIVOT
+		if (Odom_IsValid() && LtNavIdx9_InWindow(NavOdom_GetTotalDistanceM())
+		    && s_nav_idx9_exit_rot_done == 0u && s_nav_idx9_exit_rot_wait == 0u
+		    && s_lt_radar_phase == LT_RADAR_OFF) {
+			s_lost_streak = 0u;
+			return;
+		}
+#endif
 		if (!cool && (s_fsm == LT_FSM_TRACKING || s_fsm == LT_FSM_PRE_CORNER)) {
 			if (s_lost_streak < 255u)
 				s_lost_streak++;
@@ -3007,29 +3185,6 @@ u8 LineTracking_Step(void)
 	}
 #endif
 
-	/* idx10：累计里程 ≥ nav_route idx10 → 同步 sendArcDisplacement（本周期内阻塞至底盘完成） */
-	if (!s_blind_arc_done && Odom_IsValid() && !LineTrack_InMazeZone()
-	    && !LineTrack_MazeOptical_HoldsOdomExitNode()
-#if LT_RADAR_BRANCH_ENABLE
-	    && s_lt_radar_phase == LT_RADAR_OFF
-	    && s_nav_idx9_exit_rot_wait == 0u
-	    && s_nav_idx9_post_rot_blind_fwd_active == 0u
-#endif
-	    && NavOdom_GetTotalDistanceM() >= NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_POSMAP_STRONG_LEFT)) {
-		/* 右地图：+190°；左地图：-190°（与判场 s_map_mirror 一致：右图对应 mirror<0，左图对应 mirror≥0） */
-		float ang_deg = (s_map_mirror >= 0)
-		    ? (-LT_BLIND_ARC_ANGLE_MAG_DEG)
-		    : (LT_BLIND_ARC_ANGLE_MAG_DEG);
-
-		sendArcDisplacement(LT_BLIND_ARC_RADIUS_M, ang_deg, LT_BLIND_ARC_SPEED);
-		s_blind_arc_done = 1u;
-		s_err_integral = 0.0f;
-		s_d_filtered = 0.0f;
-#if LT_RADAR_BRANCH_ENABLE
-		s_nav_idx9_post_rot_blind_fwd_active = 0u;
-#endif
-	}
-
 	/* 里程 STOP 节点已触发：不再跑巡线 PID，速度保持 0（雷达等由其他任务接管） */
 	if (s_line_track_halted) {
 		LineTrack_SendVelFull(0.0f, 0.0f, 0.0f);
@@ -3061,6 +3216,29 @@ u8 LineTracking_Step(void)
 		}
 	}
 #endif
+
+	/* idx10：须在 idx9 口字盲转之后；窗内 idx9 未完成时禁止抢跑 */
+	if (!s_blind_arc_done && Odom_IsValid() && !LineTrack_InMazeZone()
+	    && !LineTrack_MazeOptical_HoldsOdomExitNode()
+#if LT_RADAR_BRANCH_ENABLE
+	    && s_lt_radar_phase == LT_RADAR_OFF
+	    && s_nav_idx9_exit_rot_wait == 0u
+	    && s_nav_idx9_post_rot_blind_fwd_active == 0u
+	    && LtNavIdx9_BlindArcAllowed()
+#endif
+	    && NavOdom_GetTotalDistanceM() >= NavRoute_GetTriggerDistM(LT_NAV_ROUTE_IDX_POSMAP_STRONG_LEFT)) {
+		float ang_deg = (s_map_mirror >= 0)
+		    ? (-LT_BLIND_ARC_ANGLE_MAG_DEG)
+		    : (LT_BLIND_ARC_ANGLE_MAG_DEG);
+
+		sendArcDisplacement(LT_BLIND_ARC_RADIUS_M, ang_deg, LT_BLIND_ARC_SPEED);
+		s_blind_arc_done = 1u;
+		s_err_integral = 0.0f;
+		s_d_filtered = 0.0f;
+#if LT_RADAR_BRANCH_ENABLE
+		s_nav_idx9_post_rot_blind_fwd_active = 0u;
+#endif
+	}
 
 	err_raw = Track_ErrBlendWithMidPair(Track_ErrFromPattern(pattern_pid), pattern_pid, black_cnt_pid);
 	LineTrack_ApplyGeoLaneShape(&err_raw, pattern_pid, black_cnt_pid);
@@ -3094,6 +3272,10 @@ u8 LineTracking_Step(void)
 		if (k_l123 < 1e-3f)
 			s_err_integral = 0.0f;
 	}
+
+#if LT_IDX45_CURVE_GUIDE_ENABLE != 0
+	LineTrack_ApplyIdx45CurveAssist(&err_raw);
+#endif
 
 	/* idx8 起～idx9 前：光电偏置贴内弧（与强引导叠加时仍有效） */
 	if (s_sensor_valid && !LineTrack_InMazeZone()
@@ -3793,6 +3975,10 @@ u8 LineTracking_Step(void)
 		    && rem_ap > -0.05f)
 			vy *= ROUTE_APPROACH_VY_K;
 	}
+
+	/* idx4～idx5 弯段：在接近减速之上再略降纵向 */
+	if (Odom_IsValid() && LtIdx45_InCurveWindow())
+		vy *= LT_IDX45_CURVE_VY_K;
 
 	/* 节点引导期额外降速，方便吸入目标分支 */
 	if (s_route_guide_ticks > 0 && s_last_junction_act != NAV_ROUTE_STRAIGHT

@@ -3,8 +3,8 @@
  * At 9.60m / 20.10m: one UTF-8 line on USART3 (LoRa).
  *
  * Wire format (ASCII + pipes + ISO-like time; only 队名 is CJK, \\x-escaped in source for Keil AC5):
- *   LORA|01|张邹建宇|2026-04-23T15:33:50|R+0m45s
- *   字段: 头|编号|队名|DS3231 当前时间(CLK)|比赛用时 R+{分}m{秒}s (上电起算)
+ *   LORA|01|电子科大学生|2026-04-23T15:33:50|R+0m45s
+ *   字段: 头|编号|组员(逗号分隔)|DS3231 当前时间(CLK)|比赛用时 R+{分}m{秒}s (上电起算)
  * 全角标点易在 VOFA+「Abc/JustFloat」里被错切字节；故分隔符用 | 与 ASCII，避免 [?:ef] 类乱码。
  * 接收端选 UTF-8；纯文本模式比 Abc 更适合本行（若用 Abc 请仅作 Raw 看字符串）。
  */
@@ -20,8 +20,9 @@ extern UART_HandleTypeDef huart3;
 #define LORA_REPORT_DIST_M_2010 20.10f
 
 static const char s_team_id[] = "01";
-/* "张邹建宇" UTF-8 */
-static const char s_team_name[] = "\xe5\xbc\xa0\xe9\x82\xb9\xe5\xbb\xba\xe5\xae\x87";
+/* 第01组：电子科大学生 UTF-8 */
+static const char s_team_name[] =
+	"\xe7\x94\xb5\xe5\xad\x90\xe7\xa7\x91\xe5\xa4\xa7\xe5\xad\xa6\xe7\x94\x9f";
 
 static void send_one_line(void)
 {
